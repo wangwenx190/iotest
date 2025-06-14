@@ -21,14 +21,15 @@
 
 using namespace Qt::StringLiterals;
 
+using IdType = quint64;
+using SizeType = quint64;
+
 static constexpr const qsizetype kMaxVertexOutputCount{ 10 };
 static constexpr const qsizetype kMaxElementOutputCount{ 10 };
 static constexpr const qsizetype kInvalidSize{ std::numeric_limits<qsizetype>::max() };
 static constexpr const auto kTxtFileName{ "test.txt"_L1 };
 static constexpr const auto kBinFileName{ "test.bin"_L1 };
-
-using IdType = quint64;
-using SizeType = quint64;
+static constexpr const SizeType kFieldSize{ 8 };
 
 struct Vertex final {
     IdType id{ 0 };
@@ -143,23 +144,48 @@ struct MemoryUnmapper final {
 };
 using ScopedMemory = std::unique_ptr<void, MemoryUnmapper>;
 
-static constexpr const SizeType kFieldSize{ 8 };
+static bool g_multiThreadEnabled{ false };
 
 static inline void generateNewTestModel(const IdType elementCount, Model& modelOut) {
     Q_ASSERT(elementCount > 0);
     Q_ASSERT(elementCount < kInvalidSize);
     modelOut.elementList.resize(elementCount);
-    QtConcurrent::blockingMap(modelOut.elementList, [elementCount](Hex& hex){
+    for (IdType elementIndex = 0; elementIndex < elementCount; ++elementIndex) {
+        modelOut.elementList[elementIndex].id = elementIndex;
+    }
+    const auto& fillNewHex = [elementCount](Hex& hex){
         for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
             hex.connection[vertexIndex] = QRandomGenerator::global()->bounded(IdType(0), elementCount);
         }
-    });
-    modelOut.vertexList.resize(elementCount * 8);
-    QtConcurrent::blockingMap(modelOut.vertexList, [](Vertex& vertex){
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.elementList, [&fillNewHex](Hex& hex){
+            fillNewHex(hex);
+        });
+    } else {
+        for (Hex& hex : modelOut.elementList) {
+            fillNewHex(hex);
+        }
+    }
+    const SizeType vertexCount = elementCount * 8;
+    modelOut.vertexList.resize(vertexCount);
+    for (IdType vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
+        modelOut.vertexList[vertexIndex].id = vertexIndex;
+    }
+    const auto& fillNewVertex = [](Vertex& vertex){
         for (IdType coordIndex = 0; coordIndex < vertex.coordinate.size(); ++coordIndex) {
             vertex.coordinate[coordIndex] = QRandomGenerator::global()->bounded(qreal(10));
         }
-    });
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.vertexList, [&fillNewVertex](Vertex& vertex){
+            fillNewVertex(vertex);
+        });
+    } else {
+        for (Vertex& vertex : modelOut.vertexList) {
+            fillNewVertex(vertex);
+        }
+    }
 }
 
 static inline void saveModelToBinary(const Model& model, QIODevice& io) {
@@ -241,19 +267,37 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
             modelOut.elementList[elementIndex].id = elementIndex;
         }
     }
-    QtConcurrent::blockingMap(modelOut.vertexList, [data](Vertex& vertex){
+    const auto& fillVertex = [data](Vertex& vertex){
         const SizeType offset = kFieldSize * (vertex.id * vertex.coordinate.size() + 2);
         for (IdType coordIndex = 0; coordIndex < vertex.coordinate.size(); ++coordIndex) {
             std::memcpy(&(vertex.coordinate[coordIndex]), data + offset + kFieldSize * coordIndex, kFieldSize);
         }
-    });
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.vertexList, [&fillVertex](Vertex& vertex){
+            fillVertex(vertex);
+        });
+    } else {
+        for (Vertex& vertex : modelOut.vertexList) {
+            fillVertex(vertex);
+        }
+    }
     const SizeType vertexDataCount = vertexCount * 3;
-    QtConcurrent::blockingMap(modelOut.elementList, [data, vertexDataCount](Hex& hex){
+    const auto& fillHex = [data, vertexDataCount](Hex& hex){
         const SizeType offset = kFieldSize * (hex.id * hex.connection.size() + vertexDataCount + 2);
         for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
             std::memcpy(&(hex.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
         }
-    });
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.elementList, [&fillHex](Hex& hex){
+            fillHex(hex);
+        });
+    } else {
+        for (Hex& hex : modelOut.elementList) {
+            fillHex(hex);
+        }
+    }
     return true;
 }
 
@@ -333,22 +377,40 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
             ++curOffsetIndex;
         }
     }
-    QtConcurrent::blockingMap(modelOut.vertexList, [data, &offsetList](Vertex& vertex){
+    const auto& fillVertex = [data, &offsetList](Vertex& vertex){
         const OffsetItem& offsetData = offsetList[vertex.id + 2];
         IdType coordIndex = 0;
         for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
             vertex.coordinate[coordIndex] = it.toDouble();
             ++coordIndex;
         }
-    });
-    QtConcurrent::blockingMap(modelOut.elementList, [data, &offsetList, vertexCount](Hex& hex){
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.vertexList, [&fillVertex](Vertex& vertex){
+            fillVertex(vertex);
+        });
+    } else {
+        for (Vertex& vertex : modelOut.vertexList) {
+            fillVertex(vertex);
+        }
+    }
+    const auto& fillHex = [data, &offsetList, vertexCount](Hex& hex){
         const OffsetItem& offsetData = offsetList[hex.id + vertexCount + 2];
         IdType vertexIndex = 0;
         for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
             hex.connection[vertexIndex] = it.toULongLong();
             ++vertexIndex;
         }
-    });
+    };
+    if (g_multiThreadEnabled) {
+        QtConcurrent::blockingMap(modelOut.elementList, [&fillHex](Hex& hex){
+            fillHex(hex);
+        });
+    } else {
+        for (Hex& hex : modelOut.elementList) {
+            fillHex(hex);
+        }
+    }
     return true;
 }
 
@@ -430,8 +492,57 @@ template <typename T>
     return true;
 }
 
+struct TimeRecorder final {
+    TimeRecorder();
+    ~TimeRecorder();
+
+    void dismiss();
+    void report();
+
+private:
+    bool m_dismissed = false;
+#if USE_QT_TIMER
+    QElapsedTimer m_timer;
+#else
+    std::chrono::high_resolution_clock::time_point m_beginTime;
+#endif
+};
+
+TimeRecorder::TimeRecorder() {
+#if USE_QT_TIMER
+    m_timer.start();
+#else
+    m_beginTime = std::chrono::high_resolution_clock::now();
+#endif
+}
+
+TimeRecorder::~TimeRecorder() {
+    report();
+}
+
+void TimeRecorder::dismiss() {
+    m_dismissed = true;
+}
+
+void TimeRecorder::report() {
+    if (m_dismissed) {
+        return;
+    }
+    m_dismissed = true;
+#if USE_QT_TIMER
+    qDebug() << "Total elapsed time:" << m_timer.elapsed() << "ms.";
+#else
+    const auto endTime = std::chrono::high_resolution_clock::now();
+    const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - m_beginTime);
+    qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
+#endif
+}
+
 int main(int argc, char *argv[])
 {
+    QCoreApplication::setApplicationName("IO Tester"_L1);
+    QCoreApplication::setApplicationVersion("1.0.0.0"_L1);
+
     QCoreApplication application(argc, argv);
 
     std::setlocale(LC_ALL, "C.UTF-8");
@@ -439,11 +550,23 @@ int main(int argc, char *argv[])
     QDir::setCurrent(QCoreApplication::applicationDirPath());
 
     QCommandLineParser parser{};
-    const QCommandLineOption generateOption("generate"_L1);
+    parser.setApplicationDescription("A small program to test some specific IO performance."_L1);
+    parser.addVersionOption();
+    parser.addHelpOption();
+    const QCommandLineOption generateOption("generate"_L1, "Generate test data file."_L1);
     parser.addOption(generateOption);
-    const QCommandLineOption elementCountOption("element-count"_L1, "element count"_L1, "number"_L1);
+    const QCommandLineOption elementCountOption("element-count"_L1, "Set test file's element count. 1 element = 8 uint64 + 24 double."_L1, "number"_L1);
     parser.addOption(elementCountOption);
+    const QCommandLineOption multiThreadOption("multi-thread"_L1, "Use multi-thread technology whenever possible (MinGW's thread implementation is very slow on Windows, be careful)."_L1);
+    parser.addOption(multiThreadOption);
+    const QCommandLineOption textOption("text"_L1, "Enable text data file generation/parsing test (may be very time consuming, be careful)."_L1);
+    parser.addOption(textOption);
     parser.process(application);
+
+    g_multiThreadEnabled = parser.isSet(multiThreadOption);
+    const bool textEnabled = parser.isSet(textOption);
+
+    qDebug() << (g_multiThreadEnabled ? "<MULTI-THREAD MODE>" : "<SINGLE-THREAD MODE>");
 
     if (parser.isSet(generateOption)) {
         const qint64 elementCount = parser.value(elementCountOption).toLongLong();
@@ -451,11 +574,15 @@ int main(int argc, char *argv[])
             qWarning() << "You should give a valid element count number.";
             return -1;
         }
-        qDebug() << "Start generating test file ...";
         Model model{};
-        generateNewTestModel(elementCount, model);
         {
-            qDebug() << "Generating binary data file ...";
+            [[maybe_unused]] TimeRecorder time{};
+            qDebug() << "Generating test data ...";
+            generateNewTestModel(elementCount, model);
+        }
+        {
+            [[maybe_unused]] TimeRecorder time{};
+            qDebug() << "Writing binary data file ...";
             QFile file(kBinFileName);
             if (!file.open(QFile::WriteOnly | QFile::Truncate)) {
                 qWarning() << "Failed to open file to write:" << file.errorString();
@@ -465,8 +592,9 @@ int main(int argc, char *argv[])
             file.flush();
             file.close();
         }
-        {
-            qDebug() << "Generating text data file ...";
+        if (textEnabled) {
+            [[maybe_unused]] TimeRecorder time{};
+            qDebug() << "Writing text data file ...";
             QFile file(kTxtFileName);
             // Don't add "QFile::Text" here! It will make QFile translate "\n" to "\r\n" on Windows!
             // This behavior would break our text parsing algorithm!
@@ -478,40 +606,35 @@ int main(int argc, char *argv[])
             file.flush();
             file.close();
         }
-        qDebug() << "Finished test file generation.";
+        qDebug() << "Finished test data file generation.";
         return 0;
     }
 
-    qDebug() << "Loading file ...";
+    qDebug() << "Start testing loading and parsing performance ...";
 
     {
-        qDebug() << "[binary, mmap] start loading ...";
-#if USE_QT_TIMER
-        QElapsedTimer timer{};
-        timer.start();
-#else
-        const auto beginTime = std::chrono::high_resolution_clock::now();
-#endif
+        [[maybe_unused]] TimeRecorder time{};
+        qDebug() << "---------- [binary, mmap] ----------";
         const auto hFile = ScopedHandle{ ::CreateFileA(kBinFileName.constData(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
         if (!hFile || hFile.get() == INVALID_HANDLE_VALUE) {
             qWarning() << "CreateFile() failed.";
             return -1;
         }
-        SizeType dataSize = 0;
+        qint64 dataSize = 0;
         {
             LARGE_INTEGER li{};
             std::memset(&li, 0, sizeof(li));
             if (!::GetFileSizeEx(hFile.get(), &li)) {
-                qWarning() << "Failed to retrieve file size.";
+                qWarning() << "GetFileSizeEx() failed.";
                 return -1;
             }
             dataSize = li.QuadPart;
         }
-        if (dataSize == 0 || dataSize >= kInvalidSize) {
+        if (dataSize <= 0 || dataSize >= kInvalidSize) {
             qWarning() << "File size is invalid.";
             return -1;
         }
-        qDebug().noquote() << "File size:" << dataSize << "bytes (" << QLocale().formattedDataSize(dataSize) << ')';
+        qDebug().noquote().nospace() << "File size: " << dataSize << " bytes (" << QLocale().formattedDataSize(dataSize) << ')';
         const auto hMapFile = ScopedHandle{ ::CreateFileMappingA(hFile.get(), nullptr, PAGE_READONLY, 0, 0, nullptr) };
         if (!hMapFile || hMapFile.get() == INVALID_HANDLE_VALUE) {
             qWarning() << "CreateFileMapping() failed.";
@@ -528,45 +651,33 @@ int main(int argc, char *argv[])
             qWarning() << "Failed to load model from binary data.";
             return -1;
         }
-        qDebug() << "Finished loading.";
-#if USE_QT_TIMER
-        qDebug() << "Total elapsed time:" << timer.elapsed() << "ms.";
-#else
-        const auto endTime = std::chrono::high_resolution_clock::now();
-        const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - beginTime);
-        qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
-#endif
         qDebug() << model;
+        qDebug() << "Finished testing.";
     }
 
-    {
-        qDebug() << "[text, mmap] start loading ...";
-#if USE_QT_TIMER
-        QElapsedTimer timer{};
-        timer.start();
-#else
-        const auto beginTime = std::chrono::high_resolution_clock::now();
-#endif
+    if (textEnabled) {
+        [[maybe_unused]] TimeRecorder time{};
+        qDebug() << "---------- [text, mmap] ----------";
         const auto hFile = ScopedHandle{ ::CreateFileA(kTxtFileName.constData(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
         if (!hFile || hFile.get() == INVALID_HANDLE_VALUE) {
             qWarning() << "CreateFile() failed.";
             return -1;
         }
-        SizeType dataSize = 0;
+        qint64 dataSize = 0;
         {
             LARGE_INTEGER li{};
             std::memset(&li, 0, sizeof(li));
             if (!::GetFileSizeEx(hFile.get(), &li)) {
-                qWarning() << "Failed to retrieve file size.";
+                qWarning() << "GetFileSizeEx() failed.";
                 return -1;
             }
             dataSize = li.QuadPart;
         }
-        if (dataSize == 0 || dataSize >= kInvalidSize) {
+        if (dataSize <= 0 || dataSize >= kInvalidSize) {
             qWarning() << "File size is invalid.";
             return -1;
         }
-        qDebug().noquote() << "File size:" << dataSize << "bytes (" << QLocale().formattedDataSize(dataSize) << ')';
+        qDebug().noquote().nospace() << "File size: " << dataSize << " bytes (" << QLocale().formattedDataSize(dataSize) << ')';
         const auto hMapFile = ScopedHandle{ ::CreateFileMappingA(hFile.get(), nullptr, PAGE_READONLY, 0, 0, nullptr) };
         if (!hMapFile || hMapFile.get() == INVALID_HANDLE_VALUE) {
             qWarning() << "CreateFileMapping() failed.";
@@ -583,25 +694,13 @@ int main(int argc, char *argv[])
             qWarning() << "Failed to load model from text data.";
             return -1;
         }
-        qDebug() << "Finished loading.";
-#if USE_QT_TIMER
-        qDebug() << "Total elapsed time:" << timer.elapsed() << "ms.";
-#else
-        const auto endTime = std::chrono::high_resolution_clock::now();
-        const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - beginTime);
-        qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
-#endif
         qDebug() << model;
+        qDebug() << "Finished testing.";
     }
 
     {
-        qDebug() << "[binary, fstream] start loading ...";
-#if USE_QT_TIMER
-        QElapsedTimer timer{};
-        timer.start();
-#else
-        const auto beginTime = std::chrono::high_resolution_clock::now();
-#endif
+        [[maybe_unused]] TimeRecorder time{};
+        qDebug() << "---------- [binary, fstream] ----------";
         std::ifstream ifs(kBinFileName.constData(), std::ios::in | std::ios::binary);
         if (!ifs.is_open()) {
             qWarning() << "Failed to open file to read.";
@@ -612,25 +711,14 @@ int main(int argc, char *argv[])
             qWarning() << "Failed to load model from binary data.";
             return -1;
         }
-        qDebug() << "Finished loading.";
-#if USE_QT_TIMER
-        qDebug() << "Total elapsed time:" << timer.elapsed() << "ms.";
-#else
-        const auto endTime = std::chrono::high_resolution_clock::now();
-        const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - beginTime);
-        qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
-#endif
+        ifs.close();
         qDebug() << model;
+        qDebug() << "Finished testing.";
     }
 
-    {
-        qDebug() << "[text, fstream] start loading ...";
-#if USE_QT_TIMER
-        QElapsedTimer timer{};
-        timer.start();
-#else
-        const auto beginTime = std::chrono::high_resolution_clock::now();
-#endif
+    if (textEnabled) {
+        [[maybe_unused]] TimeRecorder time{};
+        qDebug() << "---------- [text, fstream] ----------";
         std::ifstream ifs(kTxtFileName.constData());
         if (!ifs.is_open()) {
             qWarning() << "Failed to open file to read.";
@@ -641,25 +729,14 @@ int main(int argc, char *argv[])
             qWarning() << "Failed to load model from text data.";
             return -1;
         }
-        qDebug() << "Finished loading.";
-#if USE_QT_TIMER
-        qDebug() << "Total elapsed time:" << timer.elapsed() << "ms.";
-#else
-        const auto endTime = std::chrono::high_resolution_clock::now();
-        const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - beginTime);
-        qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
-#endif
+        ifs.close();
         qDebug() << model;
+        qDebug() << "Finished testing.";
     }
 
-    {
-        qDebug() << "[text, QTextStream] start loading ...";
-#if USE_QT_TIMER
-        QElapsedTimer timer{};
-        timer.start();
-#else
-        const auto beginTime = std::chrono::high_resolution_clock::now();
-#endif
+    if (textEnabled) {
+        [[maybe_unused]] TimeRecorder time{};
+        qDebug() << "---------- [text, QTextStream] ----------";
         QFile file(kTxtFileName);
         if (!file.open(QFile::ReadOnly | QFile::Text)) {
             qWarning() << "Failed to open file to read.";
@@ -672,15 +749,8 @@ int main(int argc, char *argv[])
             return -1;
         }
         file.close();
-        qDebug() << "Finished loading.";
-#if USE_QT_TIMER
-        qDebug() << "Total elapsed time:" << timer.elapsed() << "ms.";
-#else
-        const auto endTime = std::chrono::high_resolution_clock::now();
-        const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - beginTime);
-        qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
-#endif
         qDebug() << model;
+        qDebug() << "Finished testing.";
     }
 
     return 0;
