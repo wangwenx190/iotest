@@ -12,6 +12,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
+if(MINGW)
+    add_link_options(-static -Wl,-Bstatic)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Core Concurrent)
 
 add_executable(${PROJECT_NAME} main.cpp)
