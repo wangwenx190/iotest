@@ -12,10 +12,8 @@
 #include <QTextStream>
 #include <array>
 #include <clocale>
-#include <memory>
 #include <fstream>
 #include <chrono>
-#include <qt_windows.h>
 
 #define USE_QT_TIMER 0
 
@@ -126,24 +124,6 @@ static inline QDebug operator<<(QDebug d, const Model& model) {
     return d;
 }
 
-struct HandleCloser final {
-    inline void operator()(HANDLE handle) const {
-        if (handle && handle != INVALID_HANDLE_VALUE) {
-            ::CloseHandle(handle);
-        }
-    }
-};
-using ScopedHandle = std::unique_ptr<void, HandleCloser>;
-
-struct MemoryUnmapper final {
-    inline void operator()(LPCVOID addr) const {
-        if (addr) {
-            ::UnmapViewOfFile(addr);
-        }
-    }
-};
-using ScopedMemory = std::unique_ptr<void, MemoryUnmapper>;
-
 static bool g_multiThreadEnabled{ false };
 
 static inline void generateNewTestModel(const IdType elementCount, Model& modelOut) {
@@ -239,7 +219,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     }
 }
 
-[[nodiscard]] static inline bool loadModelFromBinaryMMap(const char* data, Model& modelOut) {
+[[nodiscard]] static inline bool loadModelFromBinaryMMap(const std::byte* data, Model& modelOut) {
     Q_ASSERT(data);
     IdType vertexCount{ 0 };
     {
@@ -615,39 +595,24 @@ int main(int argc, char *argv[])
     {
         [[maybe_unused]] TimeRecorder time{};
         qDebug() << "---------- [binary, mmap] ----------";
-        const auto hFile = ScopedHandle{ ::CreateFileA(kBinFileName.constData(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
-        if (!hFile || hFile.get() == INVALID_HANDLE_VALUE) {
-            qWarning() << "CreateFile() failed.";
+        QFile file(kBinFileName);
+        if (!file.open(QFile::ReadOnly)) {
+            qWarning() << "Failed to open file:" << file.errorString();
             return -1;
         }
-        qint64 dataSize = 0;
-        {
-            LARGE_INTEGER li{};
-            std::memset(&li, 0, sizeof(li));
-            if (!::GetFileSizeEx(hFile.get(), &li)) {
-                qWarning() << "GetFileSizeEx() failed.";
-                return -1;
-            }
-            dataSize = li.QuadPart;
-        }
+        const qint64 dataSize = file.size();
         if (dataSize <= 0 || dataSize >= kInvalidSize) {
             qWarning() << "File size is invalid.";
             return -1;
         }
         qDebug().noquote().nospace() << "File size: " << dataSize << " bytes (" << QLocale().formattedDataSize(dataSize) << ')';
-        const auto hMapFile = ScopedHandle{ ::CreateFileMappingA(hFile.get(), nullptr, PAGE_READONLY, 0, 0, nullptr) };
-        if (!hMapFile || hMapFile.get() == INVALID_HANDLE_VALUE) {
-            qWarning() << "CreateFileMapping() failed.";
+        const auto buffer = reinterpret_cast<const std::byte*>(file.map(0, dataSize));
+        if (!buffer) {
+            qWarning() << "Failed to map file to memory:" << file.errorString();
             return -1;
         }
-        const auto pBuffer = ScopedMemory{ ::MapViewOfFile(hMapFile.get(), FILE_MAP_READ, 0, 0, 0) };
-        if (!pBuffer) {
-            qWarning() << "MapViewOfFile() failed.";
-            return -1;
-        }
-        const auto data = static_cast<const char*>(pBuffer.get());
         Model model{};
-        if (!loadModelFromBinaryMMap(data, model)) {
+        if (!loadModelFromBinaryMMap(buffer, model)) {
             qWarning() << "Failed to load model from binary data.";
             return -1;
         }
@@ -658,39 +623,24 @@ int main(int argc, char *argv[])
     if (textEnabled) {
         [[maybe_unused]] TimeRecorder time{};
         qDebug() << "---------- [text, mmap] ----------";
-        const auto hFile = ScopedHandle{ ::CreateFileA(kTxtFileName.constData(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) };
-        if (!hFile || hFile.get() == INVALID_HANDLE_VALUE) {
-            qWarning() << "CreateFile() failed.";
+        QFile file(kTxtFileName);
+        if (!file.open(QFile::ReadOnly | QFile::Text)) {
+            qWarning() << "Failed to open file:" << file.errorString();
             return -1;
         }
-        qint64 dataSize = 0;
-        {
-            LARGE_INTEGER li{};
-            std::memset(&li, 0, sizeof(li));
-            if (!::GetFileSizeEx(hFile.get(), &li)) {
-                qWarning() << "GetFileSizeEx() failed.";
-                return -1;
-            }
-            dataSize = li.QuadPart;
-        }
+        const qint64 dataSize = file.size();
         if (dataSize <= 0 || dataSize >= kInvalidSize) {
             qWarning() << "File size is invalid.";
             return -1;
         }
         qDebug().noquote().nospace() << "File size: " << dataSize << " bytes (" << QLocale().formattedDataSize(dataSize) << ')';
-        const auto hMapFile = ScopedHandle{ ::CreateFileMappingA(hFile.get(), nullptr, PAGE_READONLY, 0, 0, nullptr) };
-        if (!hMapFile || hMapFile.get() == INVALID_HANDLE_VALUE) {
-            qWarning() << "CreateFileMapping() failed.";
+        const auto buffer = reinterpret_cast<const char*>(file.map(0, dataSize));
+        if (!buffer) {
+            qWarning() << "Failed to map file to memory:" << file.errorString();
             return -1;
         }
-        const auto pBuffer = ScopedMemory{ ::MapViewOfFile(hMapFile.get(), FILE_MAP_READ, 0, 0, 0) };
-        if (!pBuffer) {
-            qWarning() << "MapViewOfFile() failed.";
-            return -1;
-        }
-        const auto data = static_cast<const char*>(pBuffer.get());
         Model model{};
-        if (!loadModelFromTextMMap(data, dataSize, model)) {
+        if (!loadModelFromTextMMap(buffer, dataSize, model)) {
             qWarning() << "Failed to load model from text data.";
             return -1;
         }
