@@ -14,6 +14,7 @@
 #include <clocale>
 #include <fstream>
 #include <chrono>
+#include "fast_mem.hpp"
 
 #define USE_QT_TIMER 0
 
@@ -225,7 +226,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     Q_ASSERT(data);
     IdType vertexCount{ 0 };
     {
-        std::memcpy(&vertexCount, data, kFieldSize);
+        IOTest::Detail::fast_memcpy(&vertexCount, data, kFieldSize);
         if (vertexCount == 0 || vertexCount >= kInvalidSize) {
             qWarning() << "Vertex count is invalid.";
             return false;
@@ -238,7 +239,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     }
     IdType elementCount{ 0 };
     {
-        std::memcpy(&elementCount, data + kFieldSize, kFieldSize);
+        IOTest::Detail::fast_memcpy(&elementCount, data + kFieldSize, kFieldSize);
         if (elementCount == 0 || elementCount >= kInvalidSize) {
             qWarning() << "Element count is invalid.";
             return false;
@@ -252,7 +253,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     const auto& fillVertex = [data](Vertex& vertex){
         const SizeType offset = kFieldSize * (vertex.id * vertex.coordinate.size() + 2);
         for (IdType coordIndex = 0; coordIndex < vertex.coordinate.size(); ++coordIndex) {
-            std::memcpy(&(vertex.coordinate[coordIndex]), data + offset + kFieldSize * coordIndex, kFieldSize);
+            IOTest::Detail::fast_memcpy(&(vertex.coordinate[coordIndex]), data + offset + kFieldSize * coordIndex, kFieldSize);
         }
     };
     if (g_multiThreadEnabled) {
@@ -268,7 +269,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     const auto& fillHex = [data, vertexDataCount](Hex& hex){
         const SizeType offset = kFieldSize * (hex.id * hex.connection.size() + vertexDataCount + 2);
         for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
-            std::memcpy(&(hex.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
+            IOTest::Detail::fast_memcpy(&(hex.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
         }
     };
     if (g_multiThreadEnabled) {
