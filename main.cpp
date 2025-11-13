@@ -1,22 +1,24 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QLocale>
-#include <QRandomGenerator>
 #include <QList>
 #include <QFile>
 #include <QDebug>
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QElapsedTimer>
-#include <QtConcurrentMap>
 #include <QTextStream>
 #include <array>
 #include <clocale>
 #include <fstream>
 #include <chrono>
+#include <thread>
+#include <vector>
 #include "fast_mem.hpp"
 
-#define USE_QT_TIMER 0
+#ifndef IOTEST_USE_QT_TIMER
+#  define IOTEST_USE_QT_TIMER 0
+#endif
 
 using namespace Qt::StringLiterals;
 
@@ -28,7 +30,79 @@ static constexpr const qsizetype kMaxElementOutputCount{ 10 };
 static constexpr const qsizetype kInvalidSize{ std::numeric_limits<qsizetype>::max() };
 static constexpr const auto kTxtFileName{ "test.txt"_L1 };
 static constexpr const auto kBinFileName{ "test.bin"_L1 };
-static constexpr const SizeType kFieldSize{ 8 };
+static constexpr const SizeType kFieldSize{ sizeof(IdType) };
+
+class FastRandomInt {
+    FastRandomInt(const FastRandomInt&) = delete;
+    FastRandomInt& operator=(const FastRandomInt&) = delete;
+
+public:
+    FastRandomInt(const quint64 max, const quint64 seed);
+    ~FastRandomInt();
+
+    [[nodiscard]] quint64 next();
+
+private:
+    const quint64 max{ 0 };
+    quint64 state{ 0 };
+};
+
+class FastRandomDbl {
+    FastRandomDbl(const FastRandomDbl&) = delete;
+    FastRandomDbl& operator=(const FastRandomDbl&) = delete;
+
+public:
+    FastRandomDbl(const quint64 seed);
+    ~FastRandomDbl();
+
+    [[nodiscard]] qreal next();
+
+private:
+    quint64 state{ 0 };
+};
+
+FastRandomInt::FastRandomInt(const quint64 max, const quint64 seed) : max(max), state(seed) {}
+
+FastRandomInt::~FastRandomInt() = default;
+
+quint64 FastRandomInt::next() {
+    // EXTREMELY fast but also very low quality!
+    state = state * 1664525 + 1013904223;
+    return state % max;
+}
+
+FastRandomDbl::FastRandomDbl(const quint64 seed) : state(seed) {}
+
+FastRandomDbl::~FastRandomDbl() = default;
+
+qreal FastRandomDbl::next() {
+    // EXTREMELY fast but also very low quality!
+    state = state * 1664525 + 1013904223;
+    return static_cast<qreal>(state) / (static_cast<qreal>(std::numeric_limits<quint64>::max()) + qreal(1));
+}
+
+template <typename Lambda>
+static inline void parallelForBlocks(void* context, const SizeType count, const Lambda& func, SizeType threadCount = 0) {
+    Q_ASSERT(context);
+    Q_ASSERT(count > 0);
+
+    if (threadCount == 0) {
+        threadCount = std::jthread::hardware_concurrency(); // Or: QThread::idealThreadCount()
+        if (threadCount == 0) {
+            threadCount = 2;
+        }
+    }
+
+    std::vector<std::jthread> threadList{};
+    threadList.resize(threadCount);
+
+    const SizeType blockSize{ count / threadCount };
+    for (SizeType index{ 0 }; index < threadCount; ++index) {
+        const SizeType start{ index * blockSize };
+        const SizeType end{ (index == threadCount - 1) ? count : start + blockSize };
+        threadList[index] = std::move(std::jthread{ std::move([&func, context, index, start, end](){ func(context, index, start, end); }) });
+    }
+}
 
 struct Vertex final {
     IdType id{ 0 };
@@ -131,40 +205,56 @@ static inline void generateNewTestModel(const IdType elementCount, Model& modelO
     Q_ASSERT(elementCount > 0);
     Q_ASSERT(elementCount < kInvalidSize);
     modelOut.elementList.resize(elementCount);
-    for (IdType elementIndex = 0; elementIndex < elementCount; ++elementIndex) {
-        modelOut.elementList[elementIndex].id = elementIndex;
-    }
-    const auto& fillNewHex = [elementCount](Hex& hex){
-        for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
-            hex.connection[vertexIndex] = QRandomGenerator::global()->bounded(elementCount);
-        }
-    };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.elementList, [&fillNewHex](Hex& hex){
-            fillNewHex(hex);
-        });
+        const auto& blockHandler{ [elementCount](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& elementList{ *static_cast<HexList*>(context) };
+            FastRandomInt rng(elementCount, blockIndex + 1);
+            for (IdType elementIndex{ beginIndex }; elementIndex < endIndex; ++elementIndex) {
+                Hex& element{ elementList[elementIndex] };
+                element.id = elementIndex;
+                for (IdType vertexIndex{ 0 }; vertexIndex < element.connection.size(); ++vertexIndex) {
+                    element.connection[vertexIndex] = rng.next();
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.elementList, elementCount, blockHandler);
     } else {
-        for (Hex& hex : modelOut.elementList) {
-            fillNewHex(hex);
+        FastRandomInt rng(elementCount, 1);
+        for (IdType elementIndex{ 0 }; elementIndex < elementCount; ++elementIndex) {
+            Hex& element{ modelOut.elementList[elementIndex] };
+            element.id = elementIndex;
+            for (IdType vertexIndex{ 0 }; vertexIndex < element.connection.size(); ++vertexIndex) {
+                element.connection[vertexIndex] = rng.next();
+            }
         }
     }
     const SizeType vertexCount = elementCount * 8;
     modelOut.vertexList.resize(vertexCount);
-    for (IdType vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
-        modelOut.vertexList[vertexIndex].id = vertexIndex;
-    }
-    const auto& fillNewVertex = [](Vertex& vertex){
-        for (IdType coordIndex = 0; coordIndex < vertex.coordinate.size(); ++coordIndex) {
-            vertex.coordinate[coordIndex] = QRandomGenerator::global()->bounded(qreal(10));
-        }
-    };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.vertexList, [&fillNewVertex](Vertex& vertex){
-            fillNewVertex(vertex);
-        });
+        const auto& blockHandler{ [vertexCount](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& vertexList{ *static_cast<VertexList*>(context) };
+            FastRandomDbl rng(blockIndex + 1);
+            for (IdType vertexIndex{ beginIndex }; vertexIndex < endIndex; ++vertexIndex) {
+                Vertex& vertex{ vertexList[vertexIndex] };
+                vertex.id = vertexIndex;
+                for (IdType coordIndex{ 0 }; coordIndex < vertex.coordinate.size(); ++coordIndex) {
+                    vertex.coordinate[coordIndex] = rng.next();
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.vertexList, vertexCount, blockHandler);
     } else {
-        for (Vertex& vertex : modelOut.vertexList) {
-            fillNewVertex(vertex);
+        FastRandomDbl rng(1);
+        for (IdType vertexIndex{ 0 }; vertexIndex < vertexCount; ++vertexIndex) {
+            Vertex& vertex{ modelOut.vertexList[vertexIndex] };
+            vertex.id = vertexIndex;
+            for (IdType coordIndex{ 0 }; coordIndex < vertex.coordinate.size(); ++coordIndex) {
+                vertex.coordinate[coordIndex] = rng.next();
+            }
         }
     }
 }
@@ -233,9 +323,6 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
         }
         qDebug() << "Vertex count:" << vertexCount;
         modelOut.vertexList.resize(vertexCount);
-        for (IdType vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
-            modelOut.vertexList[vertexIndex].id = vertexIndex;
-        }
     }
     IdType elementCount{ 0 };
     {
@@ -246,9 +333,6 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
         }
         qDebug() << "Element count:" << elementCount;
         modelOut.elementList.resize(elementCount);
-        for (IdType elementIndex = 0; elementIndex < elementCount; ++elementIndex) {
-            modelOut.elementList[elementIndex].id = elementIndex;
-        }
     }
     const auto& fillVertex = [data](Vertex& vertex){
         const SizeType offset = kFieldSize * (vertex.id * vertex.coordinate.size() + 2);
@@ -257,28 +341,54 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
         }
     };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.vertexList, [&fillVertex](Vertex& vertex){
-            fillVertex(vertex);
-        });
+        const auto& blockHandler{ [data](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& vertexList{ *static_cast<VertexList*>(context) };
+            for (IdType vertexIndex{ beginIndex }; vertexIndex < endIndex; ++vertexIndex) {
+                Vertex& vertex{ vertexList[vertexIndex] };
+                vertex.id = vertexIndex;
+                const SizeType offset{ kFieldSize * (vertexIndex * vertex.coordinate.size() + 2) };
+                for (IdType coordIndex{ 0 }; coordIndex < vertex.coordinate.size(); ++coordIndex) {
+                    IOTest::Detail::fast_memcpy(&(vertex.coordinate[coordIndex]), data + offset + kFieldSize * coordIndex, kFieldSize);
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.vertexList, vertexCount, blockHandler);
     } else {
-        for (Vertex& vertex : modelOut.vertexList) {
-            fillVertex(vertex);
+        for (IdType vertexIndex{ 0 }; vertexIndex < vertexCount; ++vertexIndex) {
+            Vertex& vertex{ modelOut.vertexList[vertexIndex] };
+            vertex.id = vertexIndex;
+            const SizeType offset{ kFieldSize * (vertexIndex * vertex.coordinate.size() + 2) };
+            for (IdType coordIndex{ 0 }; coordIndex < vertex.coordinate.size(); ++coordIndex) {
+                IOTest::Detail::fast_memcpy(&(vertex.coordinate[coordIndex]), data + offset + kFieldSize * coordIndex, kFieldSize);
+            }
         }
     }
     const SizeType vertexDataCount = vertexCount * 3;
-    const auto& fillHex = [data, vertexDataCount](Hex& hex){
-        const SizeType offset = kFieldSize * (hex.id * hex.connection.size() + vertexDataCount + 2);
-        for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
-            IOTest::Detail::fast_memcpy(&(hex.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
-        }
-    };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.elementList, [&fillHex](Hex& hex){
-            fillHex(hex);
-        });
+        const auto& blockHandler{ [data, vertexDataCount](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& elementList{ *static_cast<HexList*>(context) };
+            for (IdType elementIndex{ beginIndex }; elementIndex < endIndex; ++elementIndex) {
+                Hex& element{ elementList[elementIndex] };
+                element.id = elementIndex;
+                const SizeType offset{ kFieldSize * (elementIndex * element.connection.size() + vertexDataCount + 2) };
+                for (IdType vertexIndex{ 0 }; vertexIndex < element.connection.size(); ++vertexIndex) {
+                    IOTest::Detail::fast_memcpy(&(element.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.elementList, elementCount, blockHandler);
     } else {
-        for (Hex& hex : modelOut.elementList) {
-            fillHex(hex);
+        for (IdType elementIndex{ 0 }; elementIndex < elementCount; ++elementIndex) {
+            Hex& element{ modelOut.elementList[elementIndex] };
+            element.id = elementIndex;
+            const SizeType offset{ kFieldSize * (elementIndex * element.connection.size() + vertexDataCount + 2) };
+            for (IdType vertexIndex{ 0 }; vertexIndex < element.connection.size(); ++vertexIndex) {
+                IOTest::Detail::fast_memcpy(&(element.connection[vertexIndex]), data + offset + kFieldSize * vertexIndex, kFieldSize);
+            }
         }
     }
     return true;
@@ -313,9 +423,6 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
         }
         qDebug() << "Vertex count:" << vertexCount;
         modelOut.vertexList.resize(vertexCount);
-        for (IdType vertexIndex = 0; vertexIndex < vertexCount; ++vertexIndex) {
-            modelOut.vertexList[vertexIndex].id = vertexIndex;
-        }
     }
     const SizeType elementCountEndPos = getNextNewLinePos(vertexCountEndPos + 1);
     if (elementCountEndPos - 1 <= vertexCountEndPos || elementCountEndPos >= dataSize) {
@@ -332,9 +439,6 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
         }
         qDebug() << "Element count:" << elementCount;
         modelOut.elementList.resize(elementCount);
-        for (IdType elementIndex = 0; elementIndex < elementCount; ++elementIndex) {
-            modelOut.elementList[elementIndex].id = elementIndex;
-        }
     }
     struct OffsetItem final {
         IdType offset{ 0 };
@@ -360,38 +464,62 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
             ++curOffsetIndex;
         }
     }
-    const auto& fillVertex = [data, &offsetList](Vertex& vertex){
-        const OffsetItem& offsetData = offsetList[vertex.id + 2];
-        IdType coordIndex = 0;
-        for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
-            vertex.coordinate[coordIndex] = it.toDouble();
-            ++coordIndex;
-        }
-    };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.vertexList, [&fillVertex](Vertex& vertex){
-            fillVertex(vertex);
-        });
+        const auto& blockHandler{ [data, &offsetList](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& vertexList{ *static_cast<VertexList*>(context) };
+            for (IdType vertexIndex{ beginIndex }; vertexIndex < endIndex; ++vertexIndex) {
+                Vertex& vertex{ vertexList[vertexIndex] };
+                vertex.id = vertexIndex;
+                const OffsetItem& offsetData{ offsetList[vertexIndex + 2] };
+                IdType coordIndex{ 0 };
+                for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
+                    vertex.coordinate[coordIndex] = it.toDouble();
+                    ++coordIndex;
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.vertexList, vertexCount, blockHandler);
     } else {
-        for (Vertex& vertex : modelOut.vertexList) {
-            fillVertex(vertex);
+        for (IdType vertexIndex{ 0 }; vertexIndex < vertexCount; ++vertexIndex) {
+            Vertex& vertex{ modelOut.vertexList[vertexIndex] };
+            vertex.id = vertexIndex;
+            const OffsetItem& offsetData{ offsetList[vertexIndex + 2] };
+            IdType coordIndex{ 0 };
+            for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
+                vertex.coordinate[coordIndex] = it.toDouble();
+                ++coordIndex;
+            }
         }
     }
-    const auto& fillHex = [data, &offsetList, vertexCount](Hex& hex){
-        const OffsetItem& offsetData = offsetList[hex.id + vertexCount + 2];
-        IdType vertexIndex = 0;
-        for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
-            hex.connection[vertexIndex] = it.toULongLong();
-            ++vertexIndex;
-        }
-    };
     if (g_multiThreadEnabled) {
-        QtConcurrent::blockingMap(modelOut.elementList, [&fillHex](Hex& hex){
-            fillHex(hex);
-        });
+        const auto& blockHandler{ [data, &offsetList, vertexCount](void* context, const IdType blockIndex, const IdType beginIndex, const IdType endIndex){
+            Q_ASSERT(context);
+            Q_ASSERT(endIndex > beginIndex);
+            auto& elementList{ *static_cast<HexList*>(context) };
+            for (IdType elementIndex{ beginIndex }; elementIndex < endIndex; ++elementIndex) {
+                Hex& element{ elementList[elementIndex] };
+                element.id = elementIndex;
+                const OffsetItem& offsetData{ offsetList[elementIndex + vertexCount + 2] };
+                IdType vertexIndex{ 0 };
+                for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
+                    element.connection[vertexIndex] = it.toULongLong();
+                    ++vertexIndex;
+                }
+            }
+        } };
+        parallelForBlocks(&modelOut.elementList, elementCount, blockHandler);
     } else {
-        for (Hex& hex : modelOut.elementList) {
-            fillHex(hex);
+        for (IdType elementIndex{ 0 }; elementIndex < elementCount; ++elementIndex) {
+            Hex& element{ modelOut.elementList[elementIndex] };
+            element.id = elementIndex;
+            const OffsetItem& offsetData{ offsetList[elementIndex + vertexCount + 2] };
+            IdType vertexIndex{ 0 };
+            for (const auto& it : QLatin1StringView(data + offsetData.offset, offsetData.size).tokenize(u'\t')) {
+                element.connection[vertexIndex] = it.toULongLong();
+                ++vertexIndex;
+            }
         }
     }
     return true;
@@ -484,7 +612,7 @@ struct TimeRecorder final {
 
 private:
     bool m_dismissed = false;
-#if USE_QT_TIMER
+#if defined(IOTEST_USE_QT_TIMER) && (IOTEST_USE_QT_TIMER > 0)
     QElapsedTimer m_timer;
 #else
     std::chrono::high_resolution_clock::time_point m_beginTime;
@@ -492,7 +620,7 @@ private:
 };
 
 TimeRecorder::TimeRecorder() {
-#if USE_QT_TIMER
+#if defined(IOTEST_USE_QT_TIMER) && (IOTEST_USE_QT_TIMER > 0)
     m_timer.start();
 #else
     m_beginTime = std::chrono::high_resolution_clock::now();
@@ -512,7 +640,7 @@ void TimeRecorder::report() {
         return;
     }
     m_dismissed = true;
-#if USE_QT_TIMER
+#if defined(IOTEST_USE_QT_TIMER) && (IOTEST_USE_QT_TIMER > 0)
     qDebug() << "Total elapsed time:" << m_timer.elapsed() << "ms.";
 #else
     const auto endTime = std::chrono::high_resolution_clock::now();
@@ -572,8 +700,6 @@ int main(int argc, char *argv[])
                 return -1;
             }
             saveModelToBinary(model, file);
-            file.flush();
-            file.close();
         }
         if (textEnabled) {
             [[maybe_unused]] TimeRecorder time{};
@@ -586,8 +712,6 @@ int main(int argc, char *argv[])
                 return -1;
             }
             saveModelToText(model, file);
-            file.flush();
-            file.close();
         }
         qDebug() << "Finished test data file generation.";
         return 0;
