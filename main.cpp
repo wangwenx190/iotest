@@ -135,7 +135,7 @@ static inline void generateNewTestModel(const IdType elementCount, Model& modelO
     }
     const auto& fillNewHex = [elementCount](Hex& hex){
         for (IdType vertexIndex = 0; vertexIndex < hex.connection.size(); ++vertexIndex) {
-            hex.connection[vertexIndex] = QRandomGenerator::global()->bounded(IdType(0), elementCount);
+            hex.connection[vertexIndex] = QRandomGenerator::global()->bounded(elementCount);
         }
     };
     if (g_multiThreadEnabled) {
@@ -173,6 +173,7 @@ static inline void saveModelToBinary(const Model& model, QIODevice& io) {
     Q_ASSERT(!model.vertexList.isEmpty());
     Q_ASSERT(io.isOpen());
     Q_ASSERT(io.openMode() & QIODevice::WriteOnly);
+    Q_ASSERT(!(io.openMode() & QIODevice::Text));
     {
         const auto vertexCount = model.vertexList.size();
         io.write(reinterpret_cast<const char*>(&vertexCount), kFieldSize);
@@ -198,6 +199,8 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     Q_ASSERT(!model.vertexList.isEmpty());
     Q_ASSERT(io.isOpen());
     Q_ASSERT(io.openMode() & QIODevice::WriteOnly);
+    //Q_ASSERT(io.openMode() & QIODevice::Text);
+    Q_ASSERT(!(io.openMode() & QIODevice::Text));
     {
         const auto vertexCount = model.vertexList.size();
         io.write(QByteArray::number(vertexCount) + '\n');
@@ -208,8 +211,7 @@ static inline void saveModelToText(const Model& model, QIODevice& io) {
     }
     for (auto&& vertex : std::as_const(model.vertexList)) {
         for (IdType coordIndex = 0; coordIndex < vertex.coordinate.size(); ++coordIndex) {
-            // https://cppreference.com/w/cpp/types/numeric_limits/max_digits10
-            io.write(QByteArray::number(vertex.coordinate[coordIndex], 'g', std::numeric_limits<qreal>::max_digits10) + (coordIndex == vertex.coordinate.size() - 1 ? '\n' : '\t'));
+            io.write(QByteArray::number(vertex.coordinate[coordIndex]) + (coordIndex == vertex.coordinate.size() - 1 ? '\n' : '\t'));
         }
     }
     for (auto&& hex : std::as_const(model.elementList)) {
@@ -513,7 +515,7 @@ void TimeRecorder::report() {
     qDebug() << "Total elapsed time:" << m_timer.elapsed() << "ms.";
 #else
     const auto endTime = std::chrono::high_resolution_clock::now();
-    const auto elapsedTime = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(endTime - m_beginTime);
+    const auto elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - m_beginTime);
     qDebug() << "Total elapsed time:" << elapsedTime.count() << "ms.";
 #endif
 }
