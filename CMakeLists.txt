@@ -22,6 +22,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Concurrent)
 add_executable(${PROJECT_NAME} fast_mem.hpp main.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Core Qt6::Concurrent)
 if(WIN32)
+    target_sources(${PROJECT_NAME} PRIVATE app.manifest)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         UNICODE _UNICODE
         WIN32_LEAN_AND_MEAN
