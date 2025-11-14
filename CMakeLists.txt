@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 4.0)
 
 project(IOTest LANGUAGES CXX)
 
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -22,7 +26,9 @@ find_package(Qt6 REQUIRED COMPONENTS Core)
 add_executable(${PROJECT_NAME} fast_mem.hpp main.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::Core)
 if(WIN32)
-    target_sources(${PROJECT_NAME} PRIVATE app.manifest)
+    target_sources(${PROJECT_NAME} PRIVATE
+        app.manifest iotest.rc
+    )
     target_compile_definitions(${PROJECT_NAME} PRIVATE
         UNICODE _UNICODE
         WIN32_LEAN_AND_MEAN
